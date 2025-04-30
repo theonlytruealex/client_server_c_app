@@ -1,7 +1,7 @@
 TARGETS = server subscriber
 
 CXX = g++
-CXXFLAGS = -Wall -O2 -std=c++11
+CXXFLAGS = -Wall -O2 -std=c++17
 
 SERVER_SRCS = server.cpp utils.cpp
 SUBSCRIBER_SRCS = subscriber.cpp utils.cpp
@@ -19,7 +19,7 @@ run_server: server
 	./server $(PORT)
 
 run_subscriber: subscriber
-	./subscriber $(HOST) $(PORT)
+	./subscriber $(HOST) $(ID_CLIENT) $(IP_SERVER) $(PORT_SERVER)
 
 clean:
 	rm -f $(TARGETS)

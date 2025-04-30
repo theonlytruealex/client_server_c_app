@@ -14,54 +14,40 @@
 
 using namespace std;
 
-// #include <iomanip> // for hex, setw, etc.
-
-// void printHexBytes(char *data, size_t n) {
-//     cout << hex << setfill('0');
-//     for (size_t i = 0; i < n; ++i) {
-//         cout << setw(2) << static_cast<int>(data[i]) << " ";
-//     }
-//     cout << dec << endl; // Reset to decimal
-// }
-
-
-
-class Tree {
-private:
-    unordered_set<int> client_ids;  // Using set for client IDs
-
+class Tree
+{
 public:
-    unordered_map<string, Tree*> children;
+    unordered_map<string, Tree *> children;
+    bool end;
 
-    Tree* next_child(const string& name) {
-        if (!children[name]) {
+    Tree *add_child(const string &name)
+    {
+        if (!children[name])
+        {
             children[name] = new Tree();
         }
         return children[name];
     }
 
-    bool add_client(int id) {
-        return client_ids.insert(id).second;
-    }
-
-    bool remove_client(int id) {
-        return client_ids.erase(id);
-    }
-
-    void send_to_clients(const string& message) {
-        return;
-    }
-
-    vector<Tree*> get_all_children() {
-        vector<Tree*> child_refs;
-        for (auto& pair : children) {
+    vector<Tree *> get_all_children()
+    {
+        vector<Tree *> child_refs;
+        for (auto &pair : children)
+        {
             child_refs.emplace_back(pair.second);
         }
         return child_refs;
     }
 
-    ~Tree() {
-        for (auto& [name, child] : children) {
+    Tree()
+    {
+        end = false;
+    }
+
+    ~Tree()
+    {
+        for (auto &[name, child] : children)
+        {
             delete child;
         }
     }
@@ -112,6 +98,27 @@ int parse_payload(char *payload, uint8_t ptype)
     return 1 + strlen(payload);
 }
 
+void parse_topic(char *payload, Tree *root, ssize_t max_len)
+{
+    int i;
+    string part;
+    for (i = 0; i < max_len; i++)
+    {
+        if (payload[i] == '\0' || payload[i] == '/')
+            break;
+        part.push_back(payload[i]);
+    }
+
+    if (part.length() == 1 && part[0] == '+')
+    {
+        auto children = root->get_all_children();
+        for (auto &child : children)
+        {
+            parse_topic(payload + 2, child, max_len - 2);
+        }
+    }
+}
+
 int main(int argc, char *argv[])
 {
     if (argc != 2)
@@ -124,6 +131,9 @@ int main(int argc, char *argv[])
     int sockfd;
     struct sockaddr_in servaddr;
     udp_payload buffer;
+    unordered_map<int, char *> fd_to_id;
+    unordered_map<char *, int> id_to_fd;
+    vector<pair<string, Tree *>> subscriptions;
 
     // Create the two sockets
     int udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
@@ -162,17 +172,23 @@ int main(int argc, char *argv[])
     struct epoll_event ev_tcp;
     ev_tcp.events = EPOLLIN;
     ev_tcp.data.fd = tcp_socket;
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, tcp_socket, &ev_tcp);
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, tcp_socket, &ev_tcp) < 0)
+        error_exit("error adding to epoll");
 
     struct epoll_event ev_udp;
     ev_udp.events = EPOLLIN;
     ev_udp.data.fd = udp_socket;
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, udp_socket, &ev_udp);
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, udp_socket, &ev_udp) < 0)
+        error_exit("error adding to epoll");
 
     struct epoll_event command_line;
     command_line.events = EPOLLIN;
     command_line.data.fd = STDIN_FILENO;
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, STDIN_FILENO, &command_line);
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, STDIN_FILENO, &command_line) < 0)
+        error_exit("error adding to epoll");
+
+    if (listen(tcp_socket, SOMAXCONN) < 0)
+        error_exit("TCP listen failed");
 
     while (true)
     {
@@ -188,11 +204,21 @@ int main(int argc, char *argv[])
             struct sockaddr_in client_addr;
             socklen_t client_len = sizeof(client_addr);
             int connfd = accept(tcp_socket, (struct sockaddr *)&client_addr, &client_len);
-            if (connfd >= 0)
-            {
-                cout << "Accepted TCP connection\n";
-                close(connfd);
-            }
+            if (connfd < 0)
+                error_exit("Error accepting connection");
+            struct epoll_event conn;
+            conn.events = EPOLLIN;
+            conn.data.fd = connfd;
+            if (epoll_ctl(epollfd, EPOLL_CTL_ADD, connfd, &conn) < 0)
+                error_exit("error adding to epoll");
+
+            ssize_t id_len;
+            recv_all(connfd, &id_len, sizeof(id_len));
+            char *id = (char *)malloc(id_len);
+            recv_all(connfd, id, id_len);
+
+            id_to_fd[id] = connfd;
+            fd_to_id[connfd] = id;
         }
         else if (fd == udp_socket)
         {
@@ -206,7 +232,7 @@ int main(int argc, char *argv[])
             char ip4[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &(client_addr.sin_addr), ip4, INET_ADDRSTRLEN);
             cout << ip4 << ":" << ntohs(client_addr.sin_port) << " - ";
-            int topic_len = parse_topic(buffer.topic);
+            parse_topic(buffer.topic, root, 50);
             cout << " " << payload_type[buffer.ptype] << " ";
             int payload_len = parse_payload(buffer.message, buffer.ptype);
             cout << '\n';
@@ -220,6 +246,7 @@ int main(int argc, char *argv[])
         }
     }
 
+    delete root;
     close(udp_socket);
     close(tcp_socket);
     close(epollfd);
