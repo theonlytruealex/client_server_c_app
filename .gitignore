@@ -1,1 +1,7 @@
 Enunt_Tema_2.pdf
+server
+.gitignore
+.gitignore
+pcom_hw2_udp_client/utils/__pycache__/__init__.cpython-312.pyc
+.vscode/settings.json
+pcom_hw2_udp_client/utils/__pycache__/unpriv_port.cpython-312.pyc
