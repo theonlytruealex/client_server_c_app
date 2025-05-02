@@ -1,20 +1,28 @@
 #include <stdint.h>
 
-typedef struct topic_update {
-    size_t len;
-    char payload[1587];
+typedef struct __attribute__((packed)) uid {
+    uint32_t size;
+    char id[11];
+} uid;
+
+typedef struct __attribute__((packed)) topic_body {
+    uint32_t size;
+    char cells[51];
+} topic_body;
+
+typedef struct __attribute__((packed)) topic_update {
+    uint32_t len;
+    char preambule[30];
+    topic_body topic;
+    uint32_t payload_len;
+    char payload[1520];
 } topic_update;
 
-typedef struct subscription {
-    int sub_state;
-    char topic[51];
+typedef struct __attribute__((packed)) subscription {
+    uint32_t len;
+    uint8_t sub_state;
+    topic_body topic;
 } subscription;
-
-const char *payload_type[4] = {
-    "INT",
-    "SHORT_REAL",
-    "FLOAT",
-    "STRING"};
 
 typedef struct __attribute__((packed)) udp_payload
 {
@@ -23,10 +31,12 @@ typedef struct __attribute__((packed)) udp_payload
     char message[1501];
 } udp_payload;
 
+void printHexBytes(char *data, uint32_t n);
+
 void error_exit(const std::string& s); 
 
 int epoll_add(int epollfd, int fd, void *ptr, int event);
 
-void send_all(int sockfd, void *buffer, size_t len);
+int send_all(int sockfd, void *buffer, uint32_t len);
 
-void recv_all(int sockfd, void *buffer, size_t len);
+int recv_all(int sockfd, void *buffer);
