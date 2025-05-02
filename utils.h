@@ -40,3 +40,5 @@ int epoll_add(int epollfd, int fd, void *ptr, int event);
 int send_all(int sockfd, void *buffer, uint32_t len);
 
 int recv_all(int sockfd, void *buffer);
+
+int add_to_epoll(int epollfd, int sockfd);

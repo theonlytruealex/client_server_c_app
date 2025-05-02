@@ -17,44 +17,41 @@ using namespace std;
 
 int parse_payload(char *payload, uint8_t ptype, topic_update *message)
 {
-    char buffer[2000];
-
     switch (ptype)
     {
     case 0:
     {
-        unsigned int value = ntohl(*((unsigned int *)(payload + 1)));
-        if (payload[0] != 0)
-        {
-
-            message->payload[message->payload_len] = '-';
-        }
-        return snprintf(message->payload + message->payload_len + payload[0], sizeof(message->payload),
-                        "%u", value);
+        uint8_t sign = payload[0];
+        uint32_t value = ntohl(*((uint32_t *)(payload + 1)));
+        // 0 had a 1 as a sign while testing, it should not have minus
+        // sign before it
+        if (value == 0)
+            sign = 0;
+        return snprintf(message->payload + message->payload_len,
+                        sizeof(message->payload) - message->payload_len,
+                        "%s%u", (sign ? "-" : ""), value);
     }
     case 1:
     {
-        uint16_t short_real = ntohs(*((uint16_t *)payload));
-        return snprintf(message->payload + message->payload_len, sizeof(message->payload),
-                        "%.2f", short_real / 100.0);
+        uint16_t value = ntohs(*((uint16_t *)payload));
+        return snprintf(message->payload + message->payload_len,
+                        sizeof(message->payload) - message->payload_len,
+                        "%.2f", value / 100.0);
     }
     case 2:
     {
-        uint32_t long_real = ntohl(*((uint32_t *)(payload + 1)));
+        uint8_t sign = payload[0];
+        uint32_t value = ntohl(*((uint32_t *)(payload + 1)));
         uint8_t power = payload[5];
-        double divisor = pow(10, power);
-        double value = long_real / divisor;
-
-        if (payload[0] != 0)
-        {
-            message->payload[message->payload_len] = '-';
-        }
-        return snprintf(message->payload + message->payload_len + payload[0], sizeof(message->payload),
-                        "%.*f", (int)power, value);
+        double real_value = value / pow(10.0, power);
+        return snprintf(message->payload + message->payload_len,
+                        sizeof(message->payload) - message->payload_len,
+                        "%s%.*f", (sign ? "-" : ""), power, real_value);
     }
     case 3:
     {
-        strncpy(message->payload + message->payload_len, payload, sizeof(message->payload));
+        strncpy(message->payload + message->payload_len, payload,
+                sizeof(message->payload) - message->payload_len - 1);
         return strlen(payload);
     }
     }
@@ -63,14 +60,18 @@ int parse_payload(char *payload, uint8_t ptype, topic_update *message)
 
 bool topic_matches(const char *pattern, const char *topic)
 {
+    // go one space at a time, check if strings match
     while (*pattern != '\0' && *topic != '\0')
     {
+        // special case for wildcard: skip one 'word' in topic
         if (*pattern == '+')
         {
             pattern++;
             while (*topic != '\0' && *topic != '/')
                 topic++;
         }
+        // second special wildcard case, check for matches with all
+        // next starting points
         else if (*pattern == '*')
         {
             pattern++;
@@ -102,7 +103,7 @@ bool topic_matches(const char *pattern, const char *topic)
     return false;
 }
 
-void parse_topic(
+void handle_udp_message(
     char *raw_topic,
     struct sockaddr_in client_addr,
     udp_payload *buffer,
@@ -118,6 +119,7 @@ void parse_topic(
     topic_update message;
     uint32_t len = 0;
 
+    // complit the topic_update struct
     char ip4[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &(client_addr.sin_addr), ip4, INET_ADDRSTRLEN);
     snprintf(message.preambule, sizeof(message.preambule),
@@ -128,7 +130,7 @@ void parse_topic(
     message.topic.size = htonl(strlen(message.topic.cells));
     message.payload_len = snprintf(message.payload,
                                    sizeof(message.payload),
-                                   "- %s - ", payload_type[buffer->ptype]);
+                                   " - %s - ", payload_type[buffer->ptype]);
 
     message.payload_len += parse_payload(buffer->message, buffer->ptype, &message);
     message.payload[message.payload_len++] = '\0';
@@ -138,6 +140,7 @@ void parse_topic(
     len += sizeof(len);
     message.payload_len = htonl(message.payload_len);
 
+    // search for subscribers for this topic
     for (auto &[id, topics] : subscriptions)
     {
         for (auto &sub_topic : topics)
@@ -145,10 +148,7 @@ void parse_topic(
             if (topic_matches(sub_topic.c_str(), message.topic.cells))
             {
                 if (id_to_fd.count(id))
-                {
                     send_all(id_to_fd[id], &message, len);
-                    cout << "sent " << message.topic.cells << " to: " << id << "\n";
-                }
                 break;
             }
         }
@@ -157,10 +157,63 @@ void parse_topic(
 
 void close_connections(unordered_map<int, string> &fd_to_id)
 {
+    for (auto &[fd, _] : fd_to_id)
+        close(fd);
 }
 
-void close_connection(int fd)
+void close_connection(int fd,
+                      unordered_map<int, string> &fd_to_id,
+                      unordered_map<string, int> &id_to_fd,
+                      int epollfd)
 {
+    epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, nullptr);
+    cout << "Client " << fd_to_id[fd] << " disconnected.\n";
+    close(fd);
+
+    if (fd_to_id.count(fd))
+    {
+        string id = fd_to_id[fd];
+        id_to_fd.erase(id);
+        fd_to_id.erase(fd);
+    }
+}
+
+void new_connection(int tcp_socket, int epollfd, unordered_map<int, string> &fd_to_id,
+                    unordered_map<string, int> &id_to_fd)
+{
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    int connfd = accept(tcp_socket, (struct sockaddr *)&client_addr, &client_len);
+    if (connfd < 0)
+        error_exit("Error accepting connection");
+
+    uid id;
+    recv_all(connfd, &id);
+    string id_str = id.id;
+    uint8_t ok = 1;
+
+    // check for already connected id and return response
+    if (id_to_fd.find(id_str) != id_to_fd.end())
+    {
+        cout << "Client " << id_str << " already connected.\n";
+        ok = 0;
+        send(connfd, &ok, 1, 0);
+        close(connfd);
+    }
+    else
+    {
+        struct epoll_event conn;
+        conn.events = EPOLLIN;
+        conn.data.fd = connfd;
+        if (epoll_ctl(epollfd, EPOLL_CTL_ADD, connfd, &conn) < 0)
+            error_exit("error adding to epoll");
+        char ip4[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &(client_addr.sin_addr), ip4, INET_ADDRSTRLEN);
+        cout << "New client " << id_str << " connected from " << ip4 << ":" << ntohs(client_addr.sin_port) << '\n';
+        send(connfd, &ok, 1, 0);
+        id_to_fd[id_str] = connfd;
+        fd_to_id[connfd] = id_str;
+    }
 }
 
 int main(int argc, char *argv[])
@@ -172,7 +225,6 @@ int main(int argc, char *argv[])
         error_exit("Invalid port value");
 
     setvbuf(stdout, NULL, _IONBF, BUFSIZ);
-    int sockfd;
     struct sockaddr_in servaddr;
     udp_payload buffer;
     unordered_map<string, unordered_set<string>> subscriptions;
@@ -213,24 +265,16 @@ int main(int argc, char *argv[])
         error_exit("setsockopt TCP_NODELAY failed");
 
     // Add sockets and STDIN to epollset
-    struct epoll_event ev_tcp;
-    ev_tcp.events = EPOLLIN;
-    ev_tcp.data.fd = tcp_socket;
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, tcp_socket, &ev_tcp) < 0)
-        error_exit("error adding to epoll");
+    if (add_to_epoll(epollfd, tcp_socket) < 0)
+        error_exit("error adding tcp socket to epoll");
 
-    struct epoll_event ev_udp;
-    ev_udp.events = EPOLLIN;
-    ev_udp.data.fd = udp_socket;
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, udp_socket, &ev_udp) < 0)
-        error_exit("error adding to epoll");
+    if (add_to_epoll(epollfd, udp_socket) < 0)
+        error_exit("error adding tcp socket to epoll");
 
-    struct epoll_event command_line;
-    command_line.events = EPOLLIN;
-    command_line.data.fd = STDIN_FILENO;
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, STDIN_FILENO, &command_line) < 0)
-        error_exit("error adding to epoll");
+    if (add_to_epoll(epollfd, STDIN_FILENO) < 0)
+        error_exit("error adding tcp socket to epoll");
 
+    // start listening
     if (listen(tcp_socket, SOMAXCONN) < 0)
         error_exit("TCP listen failed");
 
@@ -243,28 +287,12 @@ int main(int argc, char *argv[])
 
         int fd = event.data.fd;
 
+        // new connection to server
         if (fd == tcp_socket)
         {
-            struct sockaddr_in client_addr;
-            socklen_t client_len = sizeof(client_addr);
-            int connfd = accept(tcp_socket, (struct sockaddr *)&client_addr, &client_len);
-            if (connfd < 0)
-                error_exit("Error accepting connection");
-
-            struct epoll_event conn;
-            conn.events = EPOLLIN;
-            conn.data.fd = connfd;
-            if (epoll_ctl(epollfd, EPOLL_CTL_ADD, connfd, &conn) < 0)
-                error_exit("error adding to epoll");
-
-            uid id;
-            recv_all(connfd, &id);
-            string id_str = id.id;
-
-            id_to_fd[id_str] = connfd;
-            fd_to_id[connfd] = id_str;
-            cout << id_str << " just joined\n";
+            new_connection(tcp_socket, epollfd, fd_to_id, id_to_fd);
         }
+        // new udp message
         else if (fd == udp_socket)
         {
             struct sockaddr_in client_addr;
@@ -274,9 +302,9 @@ int main(int argc, char *argv[])
             if (len < 0)
                 error_exit("Error receiving UDP message");
             buffer.message[1500] = '\0';
-            ;
-            parse_topic(buffer.topic, client_addr, &buffer, subscriptions, id_to_fd);
+            handle_udp_message(buffer.topic, client_addr, &buffer, subscriptions, id_to_fd);
         }
+        // new command from console
         else if (fd == STDIN_FILENO)
         {
             string input;
@@ -287,15 +315,18 @@ int main(int argc, char *argv[])
                 break;
             }
         }
+        // subscription message from subscriber
         else
         {
             subscription sub;
             int rc = recv_all(fd, &sub);
             if (rc < 0)
                 error_exit("Error receiving subscription from " + fd_to_id[fd]);
+
+            // connection stopped by client
             else if (rc == 0)
             {
-                close_connection(fd);
+                close_connection(fd, fd_to_id, id_to_fd, epollfd);
                 continue;
             }
 
@@ -303,18 +334,13 @@ int main(int argc, char *argv[])
             sub.topic.size = ntohl(sub.topic.size);
 
             if (sub.sub_state)
-            {
-                cout << "Subscribed to " << sub.topic.cells << '\n';
                 subscriptions[fd_to_id[fd]].insert(sub.topic.cells);
-            }
             else
-            {
-                cout << "Unsubscribed from " << sub.topic.cells << '\n';
                 subscriptions[fd_to_id[fd]].erase(sub.topic.cells);
-            }
         }
     }
 
+    // cleanup
     close(udp_socket);
     close(tcp_socket);
     close(epollfd);

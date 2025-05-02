@@ -60,23 +60,30 @@ int main(int argc, char *argv[])
 
     // Send id
     id[strlen(id)] = '\0';
-    id[10] = '\0';
     uid user_id;
     strcpy(user_id.id, id);
     user_id.size = htonl(strlen(id) + 1);
-
     if (send_all(tcp_socket, &user_id, strlen(id) + 1 + sizeof(user_id.size)) < 0)
         error_exit("Could not Communicate with server");
 
-    struct epoll_event ev_tcp;
-    ev_tcp.events = EPOLLIN;
-    ev_tcp.data.fd = tcp_socket;
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, tcp_socket, &ev_tcp);
+    // check for device connected with same id
+    uint8_t ok;
+    if (recv(tcp_socket, &ok, 1, 0) < 0)
+        error_exit("Error receiving accept from server");
 
-    struct epoll_event command_line;
-    command_line.events = EPOLLIN;
-    command_line.data.fd = STDIN_FILENO;
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, STDIN_FILENO, &command_line);
+    if (!ok)
+    {
+        close(epollfd);
+        close(tcp_socket);
+        return 0;
+    }
+
+    // add tcp socket and command line to epoll
+    if (add_to_epoll(epollfd, tcp_socket) < 0)
+        error_exit("error adding tcp socket to epoll");
+
+    if (add_to_epoll(epollfd, STDIN_FILENO) < 0)
+        error_exit("error adding tcp socket to epoll");
 
     while (true)
     {
@@ -89,10 +96,12 @@ int main(int argc, char *argv[])
 
         if (fd == tcp_socket)
         {
-            cout << "Got message";
             topic_update buffer;
-            if (recv_all(tcp_socket, &buffer) < 0)
+            int rc = recv_all(tcp_socket, &buffer);
+            if (rc < 0)
                 error_exit("Error receiving server topic");
+            else if (rc == 0)
+                break;
             buffer.len = ntohl(buffer.len);
             buffer.payload_len = ntohl(buffer.payload_len);
             cout << buffer.preambule << buffer.topic.cells << buffer.payload << '\n';
@@ -101,17 +110,23 @@ int main(int argc, char *argv[])
         {
             string input;
             getline(cin, input);
+
+            // only commands are exit, subscribe and unsubscribe
             if (input.length() < 4)
             {
-                write(STDERR_FILENO, "Bad Command\n", 12);
+                if (write(STDERR_FILENO, "Bad Command, too short\n", 24) < 0)
+                    error_exit("Falied to write to stderr");
                 continue;
             }
             if (input.compare("exit") == 0)
                 break;
+
+            // 11 = 9 letters for subscribe + whitespace + at least 1 more character
             if (input.length() < 11)
             {
                 cout << input;
-                write(STDERR_FILENO, "Bad Command\n", 12);
+                if (write(STDERR_FILENO, "Bad Command\n", 12) < 0)
+                    error_exit("Falied to write to stderr");
                 continue;
             }
             if (!input.substr(0, 10).compare("subscribe "))
@@ -122,6 +137,13 @@ int main(int argc, char *argv[])
                 // remove leading whitespaces
                 while (input[9 + spacecount] == ' ')
                     spacecount++;
+                // do not send an empty string
+                if (input[9 + spacecount] == '\0')
+                {
+                    if (write(STDERR_FILENO, "Bad Command, too short\n", 24) < 0)
+                        error_exit("Falied to write to stderr");
+                    continue;
+                }
                 topic.size = input.length() - 9 - spacecount;
                 strncpy(topic.cells, input.c_str() + 9 + spacecount, 51);
                 topic.cells[topic.size] = '\0';
@@ -134,9 +156,12 @@ int main(int argc, char *argv[])
                 cout << "Subscribed to topic " << topic.cells << '\n';
                 continue;
             }
+
+            // 13 = 11 letters for unsubscribe + whitespace + at least 1 more character
             if (input.length() < 13)
             {
-                write(STDERR_FILENO, "Bad Command\n", 12);
+                if (write(STDERR_FILENO, "Bad Command\n", 12) < 0)
+                    error_exit("Falied to write to stderr");
                 continue;
             }
             if (!input.substr(0, 12).compare("unsubscribe "))
@@ -147,6 +172,14 @@ int main(int argc, char *argv[])
                 // remove leading whitespaces
                 while (input[11 + spacecount] == ' ')
                     spacecount++;
+
+                // do not send an empty string
+                if (input[11 + spacecount] == '\0')
+                {
+                    if (write(STDERR_FILENO, "Bad Command, too short\n", 24) < 0)
+                        error_exit("Falied to write to stderr");
+                    continue;
+                }
                 topic.size = input.length() - 11 - spacecount;
                 strncpy(topic.cells, input.c_str() + 11 + spacecount, 51);
                 topic.cells[topic.size] = '\0';
@@ -161,12 +194,13 @@ int main(int argc, char *argv[])
             }
             else
             {
-                write(STDERR_FILENO, "Bad Command\n", 12);
+                if (write(STDERR_FILENO, "Bad Command\n", 12) < 0)
+                    error_exit("Falied to write to stderr");
                 continue;
             }
         }
     }
-
     close(tcp_socket);
     close(epollfd);
+    return 0;
 }

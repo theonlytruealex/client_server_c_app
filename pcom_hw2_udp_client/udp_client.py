@@ -33,8 +33,8 @@ def setup_parser():
 
     inputs = parser.add_argument_group('Input')
     inputs.add_argument('--input_file', type=lambda arg: read_json_file(parser, arg), metavar='FILE',
-                        default='sample_payloads.json',
-                        help='JSON file to read payloads from (default: sample_payloads.json)')
+                        default='sample_wildcard_payloads.json',
+                        help='JSON file to read payloads from (default: sample_wildcard_payloads.json)')
 
     server_address = parser.add_argument_group('Server Address & Port (required)')
     server_address.add_argument('server_ip', help='Server IP', type=ip_address)
