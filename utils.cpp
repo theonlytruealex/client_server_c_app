@@ -10,16 +10,6 @@ void error_exit(const std::string &s)
     exit(1);
 }
 
-int epoll_add(int epollfd, int fd, void *ptr, int event)
-{
-    struct epoll_event ev;
-
-    ev.events = event;
-    ev.data.ptr = ptr;
-
-    return epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev);
-}
-
 int send_all(int sockfd, void *buffer, uint32_t len)
 {
     uint32_t bytes_sent = 0;

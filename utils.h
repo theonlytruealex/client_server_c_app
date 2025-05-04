@@ -31,11 +31,8 @@ typedef struct __attribute__((packed)) udp_payload
     char message[1501];
 } udp_payload;
 
-void printHexBytes(char *data, uint32_t n);
 
 void error_exit(const std::string& s); 
-
-int epoll_add(int epollfd, int fd, void *ptr, int event);
 
 int send_all(int sockfd, void *buffer, uint32_t len);
 
