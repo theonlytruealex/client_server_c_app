@@ -186,6 +186,11 @@ void new_connection(int tcp_socket, int epollfd, unordered_map<int, string> &fd_
     int connfd = accept(tcp_socket, (struct sockaddr *)&client_addr, &client_len);
     if (connfd < 0)
         error_exit("Error accepting connection");
+    int flag = 1;
+
+    // disable Nagle on new socket
+    if (setsockopt(connfd, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int)) < 0)
+        error_exit("setsockopt TCP_NODELAY failed");
 
     uid id;
     recv_all(connfd, &id);
